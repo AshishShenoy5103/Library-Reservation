@@ -16,7 +16,9 @@ public class BookStore {
 
     @PostConstruct
     public void seed() {
-
+        add("Clean Code", "Robert C. Martin", 2);
+        add("Effective Java", "Joshua Bloch", 1);
+        add("Design Patterns", "Gang of Four", 3);
     }
 
     public Book add(String title, String author, int totalCopies) {
