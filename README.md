@@ -184,7 +184,74 @@ public class JwtAuthEntryPoint implements AuthenticationEntryPoint {
 
 In short: without this, a missing/invalid token gives a messy default error. With this, it gives a clean, consistent JSON 401 response.
 
-### 6. (Next steps — to be filled in)
+### 6. JwtAuthenticationFilter
 
-- [ ] Set up user/reservation entities
-- [ ] Configure endpoints for login/register
+Runs on every request, checks for a JWT, and tells Spring Security who the caller is if the token is valid. Sits in `security/JwtAuthenticationFilter.java`.
+
+```java
+package com.api.libraryreservation.security;
+
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.JwtException;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+import java.util.List;
+
+public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    private final JwtUtil jwtUtil;
+
+    public JwtAuthenticationFilter(JwtUtil jwtUtil) {
+        this.jwtUtil = jwtUtil;
+    }
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain) throws ServletException, IOException {
+        String header = request.getHeader("Authorization");
+
+        if(header != null && header.startsWith("Bearer ")) {
+            String token = header.substring(7);
+
+            try {
+                Claims claims = jwtUtil.parseToken(token);
+
+                String username = claims.getSubject();
+                String role = claims.get("role", String.class);
+
+                List<SimpleGrantedAuthority> authorites = List.of(new SimpleGrantedAuthority("ROLE_" + role));
+
+                UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(username, null, authorites);
+
+                SecurityContextHolder.getContext().setAuthentication(authentication);
+            } catch (JwtException ex) {
+                // invalid/expired token - SecurityContext stays empty
+                // AuthorizationFilter will reject downstream, JwtAuthEntryPoint handles it
+            }
+        }
+
+        filterChain.doFilter(request, response);
+    }
+}
+```
+
+**Why each piece is there, in plain terms:**
+
+- `extends OncePerRequestFilter` — a Spring Security base class guaranteeing this filter runs exactly once per request, regardless of internal forwards/dispatches. This gets plugged into the security filter chain (in `SecurityConfig`, before the default auth filter).
+- `request.getHeader("Authorization")` + `startsWith("Bearer ")` — JWTs are sent as `Authorization: Bearer <token>`. This checks that format and strips off `"Bearer "` (7 chars) to get the raw token.
+- `jwtUtil.parseToken(token)` — this is where `JwtUtil` from step 4 gets used: verifies the signature and decodes the claims (username, role, expiry).
+- `claims.getSubject()` / `claims.get("role", String.class)` — pulls the username and role back out of the token, exactly as they were put in during `generateToken`.
+- `new SimpleGrantedAuthority("ROLE_" + role)` — Spring Security expects roles prefixed with `ROLE_` (its convention for `hasRole("X")` checks to work).
+- `UsernamePasswordAuthenticationToken(username, null, authorites)` — builds an "already authenticated" object. `null` is the credentials field (no password needed here — the valid JWT *is* the proof).
+- `SecurityContextHolder.getContext().setAuthentication(authentication)` — this is the actual "log the user in for this request" step. From here on, Spring Security treats this request as coming from an authenticated user with that role.
+- `catch (JwtException ex) { }` — if the token is invalid/expired, we deliberately do nothing here. The `SecurityContext` just stays empty, so the request proceeds unauthenticated — it's `JwtAuthEntryPoint` (step 5) that handles rejecting it downstream, not this filter.
+- `filterChain.doFilter(request, response)` — always called at the end, whether auth succeeded or not, so the request keeps moving through the rest of the filter chain.
+
+In short: this filter is the bridge between "here's a JWT in the header" and "Spring Security now knows who you are for this request."
