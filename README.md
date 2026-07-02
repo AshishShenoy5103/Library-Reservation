@@ -59,3 +59,17 @@ jwt.expiry-ms=${JWT_EXPIRY_MS:3600000}
 >
 > `jwt.expiry-ms` has a default value of `3600000` ms = 1 hour, used if `JWT_EXPIRY_MS` isn't set.
 
+### 3. UserDetailsService
+
+`UserDetailsService` is a core Spring Security interface. Given a username, it fetches the user (from DB or elsewhere) and returns a `UserDetails` object (username, password, authorities/roles, account status flags). Spring Security calls this internally during authentication — you don't call it directly.
+
+It's an interface with one abstract method, so you implement it and override `loadUserByUsername`:
+
+```java
+public interface UserDetailsService {
+    UserDetails loadUserByUsername(String username) throws UsernameNotFoundException;
+}
+```
+
+> Used during login (`AuthenticationManager` calls it to verify credentials) and again on later requests when the JWT filter reloads the user to set `SecurityContext` — the token proves who they claim to be, this service confirms they still exist/are valid.
+
