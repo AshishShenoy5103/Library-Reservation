@@ -119,7 +119,7 @@ public class JwtUtil {
                 .signWith(signingKey)
                 .compact();
     }
-    
+
     public Claims parseToken(String token) {
         return Jwts.parser()
                 .verifyWith((javax.crypto.SecretKey)signingKey)
@@ -140,3 +140,51 @@ public class JwtUtil {
 
 In short: `generateToken` runs at login to hand out a token. `parseToken` runs on every protected request to check the token is legit and pull out who's making the request.
 
+### 5. JwtAuthEntryPoint
+
+Handles what happens when an unauthenticated/unauthorized request hits a protected endpoint. Sits in `security/JwtAuthEntryPoint.java`.
+
+```java
+package com.api.libraryreservation.security;
+
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.web.AuthenticationEntryPoint;
+import org.springframework.stereotype.Component;
+import tools.jackson.databind.ObjectMapper;
+
+import java.io.IOException;
+import java.util.Map;
+
+@Component
+public class JwtAuthEntryPoint implements AuthenticationEntryPoint {
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Override
+    public void commence(HttpServletRequest request, HttpServletResponse response, AuthenticationException authException) throws IOException, ServletException {
+        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        response.setContentType("application/json");
+        response.getWriter().write(
+                objectMapper.writeValueAsString(Map.of("error", "Unauthorized"))
+        );
+    }
+}
+```
+
+**Why each piece is there, in plain terms:**
+
+- `AuthenticationEntryPoint` — a Spring Security interface. By default, when someone hits a protected endpoint without valid auth, Spring Security sends a plain/blank 401 or redirects to a login page. This interface lets you override that with your own response.
+- `commence(...)` — the one method you implement. Spring Security calls it automatically whenever authentication fails or is missing on a secured request.
+- `response.setStatus(SC_UNAUTHORIZED)` — sends back a proper `401` status code.
+- `response.setContentType("application/json")` — since this is an API (not a browser app with login pages), we want JSON back, not HTML.
+- `objectMapper.writeValueAsString(Map.of("error", "Unauthorized"))` — writes a clean JSON body like `{"error": "Unauthorized"}` instead of a stack trace or empty response, so frontend/API clients get something predictable to handle.
+
+In short: without this, a missing/invalid token gives a messy default error. With this, it gives a clean, consistent JSON 401 response.
+
+### 6. (Next steps — to be filled in)
+
+- [ ] Set up user/reservation entities
+- [ ] Configure endpoints for login/register
