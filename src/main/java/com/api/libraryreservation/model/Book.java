@@ -7,12 +7,12 @@ public class Book {
     private int totalCopies;
     private int availableCopies;
 
-    public Book(Long id, String title, String author, int totalCopies, int availableCopies) {
+    public Book(Long id, String title, String author, int totalCopies) {
         this.id = id;
         this.title = title;
         this.author = author;
         this.totalCopies = totalCopies;
-        this.availableCopies = availableCopies;
+        this.availableCopies = totalCopies;
     }
 
     public Long getId() {return id;}
