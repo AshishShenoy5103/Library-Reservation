@@ -255,3 +255,83 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 - `filterChain.doFilter(request, response)` — always called at the end, whether auth succeeded or not, so the request keeps moving through the rest of the filter chain.
 
 In short: this filter is the bridge between "here's a JWT in the header" and "Spring Security now knows who you are for this request."
+
+### 7. Spring Security internal flow (traced end-to-end)
+
+Tracing one concrete request end-to-end — `alice` reserving book id `1` — to understand what actually happens internally.
+
+**The request:**
+```bash
+curl -X POST http://localhost:8080/api/books/1/reserve \
+  -H "Authorization: Bearer <alice's token>"
+```
+
+**Step-by-step internal flow:**
+
+1. **SecurityContextHolderFilter** — creates a fresh, empty `SecurityContext` for this request. `SecurityContextHolder.getContext().getAuthentication()` → `null`, right now.
+2. **CsrfFilter** — disabled, skipped.
+3. **LogoutFilter** — not a logout request, passes through.
+4. **Your `JwtAuthenticationFilter`** (`doFilterInternal`)
+    - reads header: `Bearer eyJhbGc...`
+    - `jwtUtil.parseToken(token)` → verifies signature using `signingKey`, checks expiry
+    - extracts `username="alice"`, `role="MEMBER"` from claims
+    - builds `new UsernamePasswordAuthenticationToken("alice", null, [SimpleGrantedAuthority("ROLE_MEMBER")])`
+    - `SecurityContextHolder.getContext().setAuthentication(thatObject)`
+    - `filterChain.doFilter(...)` — hands off control
+5. **UsernamePasswordAuthenticationFilter** — Spring's built-in one, irrelevant here, passes through.
+6. **ExceptionTranslationFilter** — wraps everything downstream, ready to catch auth exceptions if they occur.
+7. **AuthorizationFilter**
+    - checks `SecurityConfig` rules, top to bottom, for path `/api/books/1/reserve`, method `POST`
+    - matches `.anyRequest().authenticated()` (since it's not `/api/auth/login` or `GET /api/books` or `POST /api/books`)
+    - reads `SecurityContextHolder.getContext().getAuthentication()` → `Authenticated=true`, `Principal="alice"`, `Authorities=[ROLE_MEMBER]`
+    - rule only requires "authenticated", not a specific role → **PASSES**, allows request to proceed
+8. **DispatcherServlet** — matches `/api/books/{id}/reserve` POST → finds `BookController.reserveBook(id=1)` → invokes it
+9. **Inside `reserveBook(1)`:**
+    - `bookStore.get(1)` → finds the book
+    - checks `availableCopies > 0` → true
+    - `String username = SecurityContextHolder.getContext().getAuthentication().getName();` — a fresh, independent read of the same object set back in step 4; `.getName()` on `UsernamePasswordAuthenticationToken` returns the principal, `"alice"`
+    - decrements `availableCopies`, creates a `Reservation` record tied to `"alice"`
+    - returns `200` with the reservation
+
+**What the `SecurityContext`'s contents actually look like at step 7/9** (if printed with `System.out.println`):
+```
+SecurityContextImpl [
+  Authentication=UsernamePasswordAuthenticationToken [
+    Principal=alice,
+    Credentials=[PROTECTED]  (actually null, masked in toString)
+    Authenticated=true,
+    Details=null,
+    Granted Authorities=[ROLE_MEMBER]
+  ]
+]
+```
+This is one single object (`SecurityContextImpl`, holding one `Authentication` object inside it) that lives for exactly this one request's lifetime, on this one thread, reachable from any code via `SecurityContextHolder.getContext()` — no need to pass it as a parameter anywhere. That's exactly why the controller method can just call `SecurityContextHolder.getContext().getAuthentication().getName()` without `username` being passed in as a method argument from anywhere.
+
+**Which `SecurityConfig` line made step 7 pass:**
+```java
+.requestMatchers("/api/auth/login").permitAll()
+.requestMatchers(HttpMethod.GET, "/api/books").permitAll()
+.requestMatchers(HttpMethod.POST, "/api/books").hasRole("LIBRARIAN")
+.anyRequest().authenticated()   // ← THIS is the rule that matched "/api/books/1/reserve"
+```
+Since `/api/books/1/reserve` doesn't match any of the three specific rules above it, it falls through to `.anyRequest().authenticated()` — meaning any authenticated user, regardless of role, can reserve a book. That's consistent with BR-004 ("logged-in MEMBER" only) — no `.hasRole("MEMBER")` restriction was needed specifically, though one could be added later if librarians should be barred from reserving too.
+
+**Contrast: what happens if `alice` tries `POST /api/books` (add a book) — a 403 case**
+
+Step 7 changes:
+```
+→ checks SecurityConfig rules for path "/api/books", method POST
+→ matches ".requestMatchers(POST, "/api/books").hasRole("LIBRARIAN")"
+→ reads SecurityContext → Authorities=[ROLE_MEMBER]
+→ rule requires ROLE_LIBRARIAN specifically → alice doesn't have it → REJECTED
+→ throws AccessDeniedException
+→ caught by ExceptionTranslationFilter (step 6, which was just "waiting" around everything downstream)
+→ since alice WAS authenticated (just not authorized), this does NOT go to JwtAuthEntryPoint
+   (that's only for "not authenticated at all")
+→ instead, Spring's default AccessDeniedHandler fires → produces 403
+→ DispatcherServlet is NEVER reached — request stops here
+```
+
+**The precise mechanical difference:**
+- **401** — no valid `SecurityContext` at all → handled by `JwtAuthEntryPoint`
+- **403** — valid `SecurityContext`, but insufficient authority → handled by Spring's default `AccessDeniedHandler` (uncustomized, so it's the plain default response)
